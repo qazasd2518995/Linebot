@@ -123,7 +123,7 @@ async function logConversation(botConfig, botId, userId, userMessage, botRespons
         const conversationId = `${botId}_${userId}_${Date.now()}`;
 
         const item = {
-            'SLA_Linebot': conversationId,  // Partition key
+            'SLA Linebot': conversationId,  // Partition key
             'timestamp': timestamp,
             'bot_id': botId,
             'student_name': botConfig.studentName,
