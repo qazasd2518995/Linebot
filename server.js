@@ -386,7 +386,10 @@ app.post('/api/register', (req, res) => {
 
     // Save configs
     if (saveBotConfigs(configs)) {
-        const webhookUrl = `${req.protocol}://${req.get('host')}/webhook/${botId}`;
+        // Use https in production (Render uses reverse proxy)
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const host = req.get('host');
+        const webhookUrl = `https://${host}/webhook/${botId}`;
         res.json({
             success: true,
             message: 'Bot registered successfully!',
