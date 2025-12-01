@@ -181,6 +181,26 @@ async function getAIResponse(systemPrompt, userMessage, userId, botId) {
 // LINE Webhook Endpoint (handles all bots)
 // ==========================================
 
+// GET endpoint for browser access and verification
+app.get('/webhook/:botId', (req, res) => {
+    const botId = req.params.botId;
+    const botConfig = getBotConfig(botId);
+
+    if (botConfig) {
+        res.json({
+            status: 'OK',
+            message: `Webhook endpoint for ${botConfig.studentName}'s ${botConfig.skillType} Bot is active`,
+            botId: botId,
+            note: 'This endpoint receives POST requests from LINE. Use LINE app to chat with the bot.'
+        });
+    } else {
+        res.status(404).json({
+            error: 'Bot not found',
+            botId: botId
+        });
+    }
+});
+
 // Raw body parser for LINE webhook signature verification
 app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (req, res) => {
     const botId = req.params.botId;
