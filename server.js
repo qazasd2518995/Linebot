@@ -346,14 +346,8 @@ app.post('/api/register', (req, res) => {
         skillType,
         channelAccessToken,
         channelSecret,
-        systemPrompt,
-        adminPassword
+        systemPrompt
     } = req.body;
-
-    // Validate admin password
-    if (adminPassword !== process.env.ADMIN_PASSWORD) {
-        return res.status(401).json({ error: 'Invalid admin password' });
-    }
 
     // Validate required fields
     if (!studentName || !skillType || !channelAccessToken || !channelSecret || !systemPrompt) {
