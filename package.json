@@ -8,6 +8,8 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.940.0",
+    "@aws-sdk/lib-dynamodb": "^3.940.0",
     "@line/bot-sdk": "^8.0.0",
     "axios": "^1.6.0",
     "cors": "^2.8.5",

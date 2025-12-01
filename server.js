@@ -10,6 +10,8 @@ const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
 const { Pool } = require('pg');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -27,6 +29,17 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
+
+// AWS DynamoDB Configuration for conversation logging
+const dynamoClient = new DynamoDBClient({
+    region: process.env.AWS_REGION || 'ap-southeast-2',
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+    }
+});
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+const DYNAMODB_TABLE = process.env.DYNAMODB_TABLE || 'Linebot';
 
 // Initialize database table
 async function initDatabase() {
@@ -100,6 +113,37 @@ async function getAllBots() {
     } catch (error) {
         console.error('Error getting all bots:', error);
         return [];
+    }
+}
+
+// Log conversation to DynamoDB
+async function logConversation(botConfig, botId, userId, userMessage, botResponse) {
+    try {
+        const timestamp = new Date().toISOString();
+        const conversationId = `${botId}_${userId}_${Date.now()}`;
+
+        const item = {
+            'SLA_Linebot': conversationId,  // Partition key
+            'timestamp': timestamp,
+            'bot_id': botId,
+            'student_name': botConfig.studentName,
+            'skill_type': botConfig.skillType,
+            'system_prompt': botConfig.systemPrompt,
+            'line_user_id': userId,
+            'user_input': userMessage,
+            'bot_output': botResponse,
+            'created_at': timestamp
+        };
+
+        await docClient.send(new PutCommand({
+            TableName: DYNAMODB_TABLE,
+            Item: item
+        }));
+
+        console.log(`Conversation logged to DynamoDB: ${conversationId}`);
+    } catch (error) {
+        console.error('DynamoDB logging error:', error);
+        // Don't throw - logging failure shouldn't break the chat
     }
 }
 
@@ -299,6 +343,9 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                     await replyToLine(replyToken, aiResponse, botConfig.channelAccessToken);
                 }
 
+                // Log conversation to DynamoDB
+                await logConversation(botConfig, botId, userId, userMessage, aiResponse);
+
                 console.log(`Bot response sent successfully`);
 
             } catch (error) {
@@ -466,6 +513,7 @@ app.listen(PORT, async () => {
     console.log(`✅ Admin interface: http://localhost:${PORT}/admin.html`);
     console.log(`✅ Groq API Key: ${GROQ_API_KEY ? GROQ_API_KEY.substring(0, 15) + '...' : 'NOT SET!'}`);
     console.log(`✅ Database: PostgreSQL connected`);
+    console.log(`✅ DynamoDB: ${process.env.AWS_ACCESS_KEY_ID ? 'Configured (ap-southeast-2)' : 'NOT CONFIGURED'}`);
 
     try {
         const result = await pool.query('SELECT COUNT(*) FROM bots');
