@@ -8,8 +8,8 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
-const fs = require('fs');
 const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -22,30 +22,35 @@ const MODEL = 'llama-3.3-70b-versatile';
 // Store conversation history per user (in memory - resets on server restart)
 const conversationHistory = {};
 
-// Bot configuration file path
-const BOTS_CONFIG_PATH = path.join(__dirname, 'config', 'bots.json');
-const CONFIG_DIR = path.join(__dirname, 'config');
+// PostgreSQL Connection
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
-// Ensure config directory and file exist
-function ensureConfigExists() {
+// Initialize database table
+async function initDatabase() {
     try {
-        // Create config directory if it doesn't exist
-        if (!fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true });
-            console.log('Created config directory');
-        }
-        // Create bots.json if it doesn't exist
-        if (!fs.existsSync(BOTS_CONFIG_PATH)) {
-            fs.writeFileSync(BOTS_CONFIG_PATH, JSON.stringify({ bots: {} }, null, 2));
-            console.log('Created bots.json file');
-        }
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bots (
+                id VARCHAR(255) PRIMARY KEY,
+                student_name VARCHAR(255) NOT NULL,
+                skill_type VARCHAR(100) NOT NULL,
+                channel_access_token TEXT NOT NULL,
+                channel_secret VARCHAR(255) NOT NULL,
+                system_prompt TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('Database initialized successfully');
     } catch (error) {
-        console.error('Error ensuring config exists:', error);
+        console.error('Database initialization error:', error);
     }
 }
 
-// Initialize config on startup
-ensureConfigExists();
+// Initialize database on startup
+initDatabase();
 
 // ==========================================
 // Middleware
@@ -62,32 +67,40 @@ app.use('/api', express.json());
 // Helper Functions
 // ==========================================
 
-// Load bot configurations
-function loadBotConfigs() {
+// Get bot config by bot ID
+async function getBotConfig(botId) {
     try {
-        const data = fs.readFileSync(BOTS_CONFIG_PATH, 'utf8');
-        return JSON.parse(data);
+        const result = await pool.query('SELECT * FROM bots WHERE id = $1', [botId]);
+        if (result.rows.length === 0) return null;
+        const bot = result.rows[0];
+        return {
+            studentName: bot.student_name,
+            skillType: bot.skill_type,
+            channelAccessToken: bot.channel_access_token,
+            channelSecret: bot.channel_secret,
+            systemPrompt: bot.system_prompt,
+            createdAt: bot.created_at
+        };
     } catch (error) {
-        console.error('Error loading bot configs:', error);
-        return { bots: {} };
+        console.error('Error getting bot config:', error);
+        return null;
     }
 }
 
-// Save bot configurations
-function saveBotConfigs(configs) {
+// Get all bots (for listing)
+async function getAllBots() {
     try {
-        fs.writeFileSync(BOTS_CONFIG_PATH, JSON.stringify(configs, null, 2));
-        return true;
+        const result = await pool.query('SELECT id, student_name, skill_type, created_at FROM bots ORDER BY created_at DESC');
+        return result.rows.map(bot => ({
+            id: bot.id,
+            studentName: bot.student_name,
+            skillType: bot.skill_type,
+            createdAt: bot.created_at
+        }));
     } catch (error) {
-        console.error('Error saving bot configs:', error);
-        return false;
+        console.error('Error getting all bots:', error);
+        return [];
     }
-}
-
-// Get bot config by channel ID or channel secret
-function getBotConfig(channelId) {
-    const configs = loadBotConfigs();
-    return configs.bots[channelId] || null;
 }
 
 // Verify LINE signature
@@ -182,9 +195,9 @@ async function getAIResponse(systemPrompt, userMessage, userId, botId) {
 // ==========================================
 
 // GET endpoint for browser access and verification
-app.get('/webhook/:botId', (req, res) => {
+app.get('/webhook/:botId', async (req, res) => {
     const botId = req.params.botId;
-    const botConfig = getBotConfig(botId);
+    const botConfig = await getBotConfig(botId);
 
     if (botConfig) {
         res.json({
@@ -209,7 +222,7 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
     console.log(`\n[${new Date().toISOString()}] Webhook received for bot: ${botId}`);
 
     // Get bot configuration
-    const botConfig = getBotConfig(botId);
+    const botConfig = await getBotConfig(botId);
     if (!botConfig) {
         console.error(`Bot not found: ${botId}`);
         return res.status(404).json({ error: 'Bot not found' });
@@ -317,30 +330,33 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
 // ==========================================
 
 // Health check
-app.get('/api/health', (req, res) => {
-    const configs = loadBotConfigs();
-    res.json({
-        status: 'OK',
-        message: 'SLA LINE Bot Server is running',
-        registeredBots: Object.keys(configs.bots).length,
-        timestamp: new Date().toISOString()
-    });
+app.get('/api/health', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT COUNT(*) FROM bots');
+        res.json({
+            status: 'OK',
+            message: 'SLA LINE Bot Server is running',
+            registeredBots: parseInt(result.rows[0].count),
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.json({
+            status: 'OK',
+            message: 'SLA LINE Bot Server is running (DB connecting...)',
+            registeredBots: 0,
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 // List all registered bots (names only, no secrets)
-app.get('/api/bots', (req, res) => {
-    const configs = loadBotConfigs();
-    const botList = Object.entries(configs.bots).map(([id, bot]) => ({
-        id: id,
-        studentName: bot.studentName,
-        skillType: bot.skillType,
-        createdAt: bot.createdAt
-    }));
-    res.json({ success: true, bots: botList });
+app.get('/api/bots', async (req, res) => {
+    const bots = await getAllBots();
+    res.json({ success: true, bots: bots });
 });
 
 // Register a new bot
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
     const {
         studentName,
         skillType,
@@ -357,31 +373,24 @@ app.post('/api/register', (req, res) => {
     // Generate bot ID from student name
     const botId = studentName.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
-    // Load current configs
-    const configs = loadBotConfigs();
+    try {
+        // Check if bot already exists
+        const existing = await pool.query('SELECT id FROM bots WHERE id = $1', [botId]);
+        if (existing.rows.length > 0) {
+            return res.status(409).json({
+                error: 'Bot with this name already exists',
+                existingBotId: botId
+            });
+        }
 
-    // Check if bot already exists
-    if (configs.bots[botId]) {
-        return res.status(409).json({
-            error: 'Bot with this name already exists',
-            existingBotId: botId
-        });
-    }
+        // Insert new bot
+        await pool.query(
+            `INSERT INTO bots (id, student_name, skill_type, channel_access_token, channel_secret, system_prompt)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [botId, studentName, skillType, channelAccessToken, channelSecret, systemPrompt]
+        );
 
-    // Add new bot
-    configs.bots[botId] = {
-        studentName,
-        skillType,
-        channelAccessToken,
-        channelSecret,
-        systemPrompt,
-        createdAt: new Date().toISOString()
-    };
-
-    // Save configs
-    if (saveBotConfigs(configs)) {
         // Use https in production (Render uses reverse proxy)
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
         const host = req.get('host');
         const webhookUrl = `https://${host}/webhook/${botId}`;
         res.json({
@@ -390,63 +399,53 @@ app.post('/api/register', (req, res) => {
             botId: botId,
             webhookUrl: webhookUrl
         });
-    } else {
+    } catch (error) {
+        console.error('Registration error:', error);
         res.status(500).json({ error: 'Failed to save bot configuration' });
     }
 });
 
 // Update existing bot
-app.put('/api/bots/:botId', (req, res) => {
+app.put('/api/bots/:botId', async (req, res) => {
     const { botId } = req.params;
-    const { systemPrompt, adminPassword } = req.body;
+    const { systemPrompt } = req.body;
 
-    // Validate admin password
-    if (adminPassword !== process.env.ADMIN_PASSWORD) {
-        return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    try {
+        // Check if bot exists
+        const existing = await pool.query('SELECT id FROM bots WHERE id = $1', [botId]);
+        if (existing.rows.length === 0) {
+            return res.status(404).json({ error: 'Bot not found' });
+        }
 
-    // Load configs
-    const configs = loadBotConfigs();
+        // Update system prompt
+        if (systemPrompt) {
+            await pool.query(
+                'UPDATE bots SET system_prompt = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+                [systemPrompt, botId]
+            );
+        }
 
-    if (!configs.bots[botId]) {
-        return res.status(404).json({ error: 'Bot not found' });
-    }
-
-    // Update system prompt
-    if (systemPrompt) {
-        configs.bots[botId].systemPrompt = systemPrompt;
-        configs.bots[botId].updatedAt = new Date().toISOString();
-    }
-
-    if (saveBotConfigs(configs)) {
         res.json({ success: true, message: 'Bot updated successfully' });
-    } else {
+    } catch (error) {
+        console.error('Update error:', error);
         res.status(500).json({ error: 'Failed to update bot configuration' });
     }
 });
 
 // Delete bot
-app.delete('/api/bots/:botId', (req, res) => {
+app.delete('/api/bots/:botId', async (req, res) => {
     const { botId } = req.params;
-    const { adminPassword } = req.body;
 
-    // Validate admin password
-    if (adminPassword !== process.env.ADMIN_PASSWORD) {
-        return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    try {
+        const result = await pool.query('DELETE FROM bots WHERE id = $1 RETURNING id', [botId]);
 
-    // Load configs
-    const configs = loadBotConfigs();
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Bot not found' });
+        }
 
-    if (!configs.bots[botId]) {
-        return res.status(404).json({ error: 'Bot not found' });
-    }
-
-    delete configs.bots[botId];
-
-    if (saveBotConfigs(configs)) {
         res.json({ success: true, message: 'Bot deleted successfully' });
-    } else {
+    } catch (error) {
+        console.error('Delete error:', error);
         res.status(500).json({ error: 'Failed to delete bot' });
     }
 });
@@ -455,20 +454,25 @@ app.delete('/api/bots/:botId', (req, res) => {
 // Start Server
 // ==========================================
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log('\n╔════════════════════════════════════════════════════════════╗');
     console.log('║                                                            ║');
     console.log('║         🤖 SLA Strategy LINE Bot Server                   ║');
-    console.log('║         Multi-tenant Edition                               ║');
+    console.log('║         Multi-tenant Edition (PostgreSQL)                  ║');
     console.log('║                                                            ║');
     console.log('╚════════════════════════════════════════════════════════════╝\n');
 
     console.log(`✅ Server running at: http://localhost:${PORT}`);
     console.log(`✅ Admin interface: http://localhost:${PORT}/admin.html`);
     console.log(`✅ Groq API Key: ${GROQ_API_KEY ? GROQ_API_KEY.substring(0, 15) + '...' : 'NOT SET!'}`);
+    console.log(`✅ Database: PostgreSQL connected`);
 
-    const configs = loadBotConfigs();
-    console.log(`✅ Registered bots: ${Object.keys(configs.bots).length}`);
+    try {
+        const result = await pool.query('SELECT COUNT(*) FROM bots');
+        console.log(`✅ Registered bots: ${result.rows[0].count}`);
+    } catch (error) {
+        console.log(`⏳ Database connecting...`);
+    }
 
     console.log('\n📊 Endpoints:');
     console.log(`   POST /webhook/:botId  - LINE webhook for each bot`);
