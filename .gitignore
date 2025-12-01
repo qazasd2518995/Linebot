@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Environment variables (sensitive!)
+.env
+
+# Bot configurations (contains secrets)
+config/bots.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
