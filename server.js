@@ -24,6 +24,28 @@ const conversationHistory = {};
 
 // Bot configuration file path
 const BOTS_CONFIG_PATH = path.join(__dirname, 'config', 'bots.json');
+const CONFIG_DIR = path.join(__dirname, 'config');
+
+// Ensure config directory and file exist
+function ensureConfigExists() {
+    try {
+        // Create config directory if it doesn't exist
+        if (!fs.existsSync(CONFIG_DIR)) {
+            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+            console.log('Created config directory');
+        }
+        // Create bots.json if it doesn't exist
+        if (!fs.existsSync(BOTS_CONFIG_PATH)) {
+            fs.writeFileSync(BOTS_CONFIG_PATH, JSON.stringify({ bots: {} }, null, 2));
+            console.log('Created bots.json file');
+        }
+    } catch (error) {
+        console.error('Error ensuring config exists:', error);
+    }
+}
+
+// Initialize config on startup
+ensureConfigExists();
 
 // ==========================================
 // Middleware
