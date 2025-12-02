@@ -531,30 +531,23 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                 }
 
                 try {
-                    await replyToLine(
-                        replyToken,
-                        "🔊 Generating audio... Please wait.",
-                        botConfig.channelAccessToken
-                    );
-
                     // Generate TTS audio
                     const audioBase64 = await textToSpeech(lastResponse);
                     const audioId = storeAudio(audioBase64);
 
                     // Get server URL
-                    const protocol = 'https';
-                    const host = process.env.RENDER_EXTERNAL_URL || `localhost:${PORT}`;
-                    const audioUrl = `${protocol}://${host.replace('https://', '')}/audio/${audioId}`;
+                    const host = process.env.RENDER_EXTERNAL_URL || `https://localhost:${PORT}`;
+                    const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}`;
 
-                    // Send audio message
+                    // Send audio message using reply
                     await axios.post(
-                        'https://api.line.me/v2/bot/message/push',
+                        'https://api.line.me/v2/bot/message/reply',
                         {
-                            to: userId,
+                            replyToken: replyToken,
                             messages: [{
                                 type: 'audio',
                                 originalContentUrl: audioUrl,
-                                duration: 10000  // Approximate duration in ms
+                                duration: Math.min(lastResponse.length * 80, 60000)
                             }]
                         },
                         {
@@ -568,21 +561,10 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                     console.log('Audio sent successfully');
                 } catch (error) {
                     console.error('TTS Error:', error);
-                    await axios.post(
-                        'https://api.line.me/v2/bot/message/push',
-                        {
-                            to: userId,
-                            messages: [{
-                                type: 'text',
-                                text: "Sorry, I couldn't generate the audio. Please try again."
-                            }]
-                        },
-                        {
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${botConfig.channelAccessToken}`
-                            }
-                        }
+                    await replyToLine(
+                        replyToken,
+                        "Sorry, I couldn't generate the audio. Please try again.",
+                        botConfig.channelAccessToken
                     );
                 }
                 continue;
@@ -688,13 +670,7 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
             console.log(`User ${userId} sent audio message: ${messageId}`);
 
             try {
-                // Step 1: Download audio from LINE
-                await replyToLine(
-                    replyToken,
-                    "🎤 I received your voice message! Let me listen and provide feedback...",
-                    botConfig.channelAccessToken
-                );
-
+                // Download audio from LINE
                 const audioBuffer = await downloadAudioFromLine(messageId, botConfig.channelAccessToken);
                 console.log(`Audio downloaded: ${audioBuffer.length} bytes`);
 
@@ -702,7 +678,7 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                 const transcribedText = await transcribeAudio(audioBuffer);
                 console.log(`Transcribed: ${transcribedText}`);
 
-                // Step 3: Get AI feedback
+                // Get AI feedback
                 const feedback = await getSpeakingFeedback(
                     botConfig.systemPrompt,
                     transcribedText,
@@ -710,24 +686,11 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                     botId
                 );
 
-                // Step 4: Send feedback (use push message since we already used reply token)
-                await axios.post(
-                    'https://api.line.me/v2/bot/message/push',
-                    {
-                        to: userId,
-                        messages: [
-                            {
-                                type: 'text',
-                                text: `📝 I heard you say:\n"${transcribedText}"\n\n${feedback}`
-                            }
-                        ]
-                    },
-                    {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${botConfig.channelAccessToken}`
-                        }
-                    }
+                // Send feedback using reply token
+                await replyToLine(
+                    replyToken,
+                    `📝 I heard you say:\n"${transcribedText}"\n\n${feedback}`,
+                    botConfig.channelAccessToken
                 );
 
                 // Log to DynamoDB
