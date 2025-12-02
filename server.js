@@ -12,6 +12,7 @@ const path = require('path');
 const { Pool } = require('pg');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
+const FormData = require('form-data');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -117,7 +118,7 @@ async function getAllBots() {
 }
 
 // Log conversation to DynamoDB
-async function logConversation(botConfig, botId, userId, userMessage, botResponse) {
+async function logConversation(botConfig, botId, userId, userMessage, botResponse, messageType = 'text') {
     try {
         const timestamp = new Date().toISOString();
         const conversationId = `${botId}_${userId}_${Date.now()}`;
@@ -132,6 +133,7 @@ async function logConversation(botConfig, botId, userId, userMessage, botRespons
             'line_user_id': userId,
             'user_input': userMessage,
             'bot_output': botResponse,
+            'message_type': messageType,  // 'text' or 'audio'
             'created_at': timestamp
         };
 
@@ -144,6 +146,118 @@ async function logConversation(botConfig, botId, userId, userMessage, botRespons
     } catch (error) {
         console.error('DynamoDB logging error:', error);
         // Don't throw - logging failure shouldn't break the chat
+    }
+}
+
+// Download audio file from LINE
+async function downloadAudioFromLine(messageId, channelAccessToken) {
+    try {
+        const response = await axios.get(
+            `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${channelAccessToken}`
+                },
+                responseType: 'arraybuffer'
+            }
+        );
+        return Buffer.from(response.data);
+    } catch (error) {
+        console.error('Error downloading audio from LINE:', error);
+        throw error;
+    }
+}
+
+// Transcribe audio using Groq Whisper
+async function transcribeAudio(audioBuffer) {
+    try {
+        const formData = new FormData();
+        formData.append('file', audioBuffer, {
+            filename: 'audio.m4a',
+            contentType: 'audio/m4a'
+        });
+        formData.append('model', 'whisper-large-v3');
+        formData.append('language', 'en');  // Can be changed based on bot config
+
+        const response = await axios.post(
+            'https://api.groq.com/openai/v1/audio/transcriptions',
+            formData,
+            {
+                headers: {
+                    'Authorization': `Bearer ${GROQ_API_KEY}`,
+                    ...formData.getHeaders()
+                }
+            }
+        );
+
+        return response.data.text;
+    } catch (error) {
+        console.error('Whisper transcription error:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+// Get speaking feedback from AI
+async function getSpeakingFeedback(systemPrompt, transcribedText, userId, botId) {
+    const historyKey = `${botId}_${userId}`;
+    if (!conversationHistory[historyKey]) {
+        conversationHistory[historyKey] = [];
+    }
+
+    // Create a speaking-specific prompt
+    const speakingPrompt = `${systemPrompt}
+
+The learner just sent a VOICE MESSAGE. Here is what they said (transcribed):
+"${transcribedText}"
+
+Please provide feedback on:
+1. What they said (acknowledge their attempt)
+2. Any pronunciation tips or corrections if applicable
+3. Suggestions for improvement
+4. Encouragement to continue practicing
+
+Keep your response conversational and supportive.`;
+
+    conversationHistory[historyKey].push({
+        role: 'user',
+        content: `[Voice Message] ${transcribedText}`
+    });
+
+    if (conversationHistory[historyKey].length > 20) {
+        conversationHistory[historyKey] = conversationHistory[historyKey].slice(-20);
+    }
+
+    try {
+        const response = await axios.post(
+            GROQ_API_URL,
+            {
+                model: MODEL,
+                messages: [
+                    { role: 'system', content: speakingPrompt },
+                    ...conversationHistory[historyKey]
+                ],
+                temperature: 0.7,
+                max_tokens: 500
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${GROQ_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        const assistantMessage = response.data.choices[0].message.content;
+
+        conversationHistory[historyKey].push({
+            role: 'assistant',
+            content: assistantMessage
+        });
+
+        return assistantMessage;
+    } catch (error) {
+        console.error('Speaking feedback error:', error.response?.data || error.message);
+        throw error;
     }
 }
 
@@ -313,7 +427,7 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
             if (userMessage.toLowerCase() === '/help') {
                 await replyToLine(
                     replyToken,
-                    `Welcome to ${botConfig.studentName}'s ${botConfig.skillType} Strategy Bot!\n\nCommands:\n/reset - Clear conversation history\n/help - Show this message\n\nJust type naturally to practice ${botConfig.skillType.toLowerCase()} strategies!`,
+                    `Welcome to ${botConfig.studentName}'s ${botConfig.skillType} Strategy Bot!\n\n📝 Text: Type your message to practice\n🎤 Voice: Send a voice message for speaking practice!\n\nCommands:\n/reset - Clear conversation history\n/help - Show this message\n\nJust type or speak naturally to practice ${botConfig.skillType.toLowerCase()} strategies!`,
                     botConfig.channelAccessToken
                 );
                 continue;
@@ -358,12 +472,101 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
             }
         }
 
+        // Handle audio messages (voice messages for speaking practice)
+        if (event.type === 'message' && event.message.type === 'audio') {
+            const messageId = event.message.id;
+            const userId = event.source.userId;
+            const replyToken = event.replyToken;
+
+            console.log(`User ${userId} sent audio message: ${messageId}`);
+
+            try {
+                // Step 1: Download audio from LINE
+                await replyToLine(
+                    replyToken,
+                    "🎤 I received your voice message! Let me listen and provide feedback...",
+                    botConfig.channelAccessToken
+                );
+
+                const audioBuffer = await downloadAudioFromLine(messageId, botConfig.channelAccessToken);
+                console.log(`Audio downloaded: ${audioBuffer.length} bytes`);
+
+                // Step 2: Transcribe using Whisper
+                const transcribedText = await transcribeAudio(audioBuffer);
+                console.log(`Transcribed: ${transcribedText}`);
+
+                // Step 3: Get AI feedback
+                const feedback = await getSpeakingFeedback(
+                    botConfig.systemPrompt,
+                    transcribedText,
+                    userId,
+                    botId
+                );
+
+                // Step 4: Send feedback (use push message since we already used reply token)
+                await axios.post(
+                    'https://api.line.me/v2/bot/message/push',
+                    {
+                        to: userId,
+                        messages: [
+                            {
+                                type: 'text',
+                                text: `📝 I heard you say:\n"${transcribedText}"\n\n${feedback}`
+                            }
+                        ]
+                    },
+                    {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${botConfig.channelAccessToken}`
+                        }
+                    }
+                );
+
+                // Log to DynamoDB
+                await logConversation(
+                    botConfig,
+                    botId,
+                    userId,
+                    `[Voice Message] ${transcribedText}`,
+                    feedback,
+                    'audio'
+                );
+
+                console.log('Speaking feedback sent successfully');
+
+            } catch (error) {
+                console.error('Audio processing error:', error);
+                // Try to send error message via push
+                try {
+                    await axios.post(
+                        'https://api.line.me/v2/bot/message/push',
+                        {
+                            to: userId,
+                            messages: [{
+                                type: 'text',
+                                text: "Sorry, I had trouble processing your voice message. Please try again or type your message instead."
+                            }]
+                        },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${botConfig.channelAccessToken}`
+                            }
+                        }
+                    );
+                } catch (pushError) {
+                    console.error('Push message error:', pushError);
+                }
+            }
+        }
+
         // Handle follow event (when user adds the bot)
         if (event.type === 'follow') {
             const replyToken = event.replyToken;
             await replyToLine(
                 replyToken,
-                `Welcome! I'm ${botConfig.studentName}'s ${botConfig.skillType} Strategy Coach.\n\nI'm here to help you learn ${botConfig.skillType.toLowerCase()} strategies based on SLA theory.\n\nType /help to see available commands, or just start chatting!`,
+                `Welcome! I'm ${botConfig.studentName}'s ${botConfig.skillType} Strategy Coach.\n\nI'm here to help you learn ${botConfig.skillType.toLowerCase()} strategies based on SLA theory.\n\n📝 Type a message to practice\n🎤 Send a voice message for speaking practice!\n\nType /help for more options.`,
                 botConfig.channelAccessToken
             );
         }
