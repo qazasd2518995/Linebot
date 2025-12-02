@@ -42,6 +42,15 @@ const dynamoClient = new DynamoDBClient({
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const DYNAMODB_TABLE = process.env.DYNAMODB_TABLE || 'Linebot';
 
+// Google Cloud TTS Configuration
+const GOOGLE_TTS_API_KEY = process.env.GOOGLE_TTS_API_KEY;
+
+// Temporary audio storage (in-memory)
+const audioStorage = new Map();
+
+// Store last bot response per user (for /listen command)
+const lastBotResponse = new Map();
+
 // Initialize database table
 async function initDatabase() {
     try {
@@ -261,6 +270,56 @@ Keep your response conversational and supportive.`;
     }
 }
 
+// Text-to-Speech using Google Cloud TTS
+async function textToSpeech(text, languageCode = 'en-US') {
+    try {
+        const response = await axios.post(
+            `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_API_KEY}`,
+            {
+                input: { text: text },
+                voice: {
+                    languageCode: languageCode,
+                    name: languageCode === 'en-US' ? 'en-US-Neural2-J' : `${languageCode}-Standard-A`,
+                    ssmlGender: 'NEUTRAL'
+                },
+                audioConfig: {
+                    audioEncoding: 'MP3',
+                    speakingRate: 0.9,  // Slightly slower for learners
+                    pitch: 0
+                }
+            }
+        );
+
+        // Return base64 audio content
+        return response.data.audioContent;
+    } catch (error) {
+        console.error('Google TTS Error:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+// Store audio and return ID
+function storeAudio(audioBase64) {
+    const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+
+    // Store with expiration (clean up after 5 minutes)
+    audioStorage.set(audioId, {
+        buffer: audioBuffer,
+        createdAt: Date.now()
+    });
+
+    // Clean up old audio files
+    const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+    for (const [id, data] of audioStorage.entries()) {
+        if (data.createdAt < fiveMinutesAgo) {
+            audioStorage.delete(id);
+        }
+    }
+
+    return audioId;
+}
+
 // Verify LINE signature
 function verifySignature(body, signature, channelSecret) {
     const hash = crypto
@@ -349,6 +408,25 @@ async function getAIResponse(systemPrompt, userMessage, userId, botId) {
 }
 
 // ==========================================
+// Audio Serving Endpoint
+// ==========================================
+
+app.get('/audio/:audioId', (req, res) => {
+    const audioId = req.params.audioId;
+    const audioData = audioStorage.get(audioId);
+
+    if (!audioData) {
+        return res.status(404).json({ error: 'Audio not found or expired' });
+    }
+
+    res.set({
+        'Content-Type': 'audio/mpeg',
+        'Content-Length': audioData.buffer.length
+    });
+    res.send(audioData.buffer);
+});
+
+// ==========================================
 // LINE Webhook Endpoint (handles all bots)
 // ==========================================
 
@@ -427,9 +505,81 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
             if (userMessage.toLowerCase() === '/help') {
                 await replyToLine(
                     replyToken,
-                    `Welcome to ${botConfig.studentName}'s ${botConfig.skillType} Strategy Bot!\n\n📝 Text: Type your message to practice\n🎤 Voice: Send a voice message for speaking practice!\n\nCommands:\n/reset - Clear conversation history\n/help - Show this message\n\nJust type or speak naturally to practice ${botConfig.skillType.toLowerCase()} strategies!`,
+                    `Welcome to ${botConfig.studentName}'s ${botConfig.skillType} Strategy Bot!\n\n📝 Text: Type your message to practice\n🎤 Voice: Send a voice message for speaking practice!\n🔊 /listen: Hear the last response as audio\n\nCommands:\n/reset - Clear conversation history\n/listen - Listen to the last response\n/help - Show this message\n\nJust type or speak naturally to practice ${botConfig.skillType.toLowerCase()} strategies!`,
                     botConfig.channelAccessToken
                 );
+                continue;
+            }
+
+            // Handle /listen command - TTS for last response
+            if (userMessage.toLowerCase() === '/listen') {
+                const responseKey = `${botId}_${userId}`;
+                const lastResponse = lastBotResponse.get(responseKey);
+
+                if (!lastResponse) {
+                    await replyToLine(
+                        replyToken,
+                        "No previous response to listen to. Send me a message first!",
+                        botConfig.channelAccessToken
+                    );
+                    continue;
+                }
+
+                try {
+                    await replyToLine(
+                        replyToken,
+                        "🔊 Generating audio... Please wait.",
+                        botConfig.channelAccessToken
+                    );
+
+                    // Generate TTS audio
+                    const audioBase64 = await textToSpeech(lastResponse);
+                    const audioId = storeAudio(audioBase64);
+
+                    // Get server URL
+                    const protocol = 'https';
+                    const host = process.env.RENDER_EXTERNAL_URL || `localhost:${PORT}`;
+                    const audioUrl = `${protocol}://${host.replace('https://', '')}/audio/${audioId}`;
+
+                    // Send audio message
+                    await axios.post(
+                        'https://api.line.me/v2/bot/message/push',
+                        {
+                            to: userId,
+                            messages: [{
+                                type: 'audio',
+                                originalContentUrl: audioUrl,
+                                duration: 10000  // Approximate duration in ms
+                            }]
+                        },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${botConfig.channelAccessToken}`
+                            }
+                        }
+                    );
+
+                    console.log('Audio sent successfully');
+                } catch (error) {
+                    console.error('TTS Error:', error);
+                    await axios.post(
+                        'https://api.line.me/v2/bot/message/push',
+                        {
+                            to: userId,
+                            messages: [{
+                                type: 'text',
+                                text: "Sorry, I couldn't generate the audio. Please try again."
+                            }]
+                        },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${botConfig.channelAccessToken}`
+                            }
+                        }
+                    );
+                }
                 continue;
             }
 
@@ -456,6 +606,10 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                 } else {
                     await replyToLine(replyToken, aiResponse, botConfig.channelAccessToken);
                 }
+
+                // Store last response for /listen command
+                const responseKey = `${botId}_${userId}`;
+                lastBotResponse.set(responseKey, aiResponse);
 
                 // Log conversation to DynamoDB
                 await logConversation(botConfig, botId, userId, userMessage, aiResponse);
