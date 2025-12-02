@@ -273,19 +273,24 @@ Keep your response conversational and supportive.`;
 // Text-to-Speech using Google Cloud TTS
 async function textToSpeech(text, languageCode = 'en-US') {
     try {
+        // Limit text length to avoid issues
+        const truncatedText = text.substring(0, 5000);
+
         const response = await axios.post(
             `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_API_KEY}`,
             {
-                input: { text: text },
+                input: { text: truncatedText },
                 voice: {
                     languageCode: languageCode,
-                    name: 'en-US-Standard-J',  // Male voice
+                    name: 'en-US-Wavenet-D',  // WaveNet male voice - better quality
                     ssmlGender: 'MALE'
                 },
                 audioConfig: {
                     audioEncoding: 'MP3',
-                    speakingRate: 0.9,  // Slightly slower for learners
-                    pitch: 0
+                    sampleRateHertz: 24000,
+                    speakingRate: 0.9,
+                    pitch: 0,
+                    volumeGainDb: 0
                 }
             }
         );
