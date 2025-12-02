@@ -9,6 +9,8 @@ const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
+const { execSync } = require('child_process');
 const { Pool } = require('pg');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
@@ -213,7 +215,7 @@ async function getSpeakingFeedback(systemPrompt, transcribedText, userId, botId)
     return await getAIResponse(systemPrompt, transcribedText, userId, botId);
 }
 
-// Text-to-Speech using Google Cloud TTS
+// Text-to-Speech using Google Cloud TTS (converts to M4A for LINE compatibility)
 async function textToSpeech(text, languageCode = 'en-US') {
     try {
         // Limit text length to avoid issues
@@ -233,13 +235,39 @@ async function textToSpeech(text, languageCode = 'en-US') {
                     effectsProfileId: ['small-bluetooth-speaker-class-device'],
                     speakingRate: 1.0,
                     pitch: 0,
-                    volumeGainDb: 6.0  // Boost volume significantly
+                    volumeGainDb: 6.0
                 }
             }
         );
 
-        // Return base64 audio content
-        return response.data.audioContent;
+        // Convert MP3 to M4A using ffmpeg (LINE only supports M4A)
+        const mp3Buffer = Buffer.from(response.data.audioContent, 'base64');
+        const tempId = `temp_${Date.now()}`;
+        const mp3Path = `/tmp/${tempId}.mp3`;
+        const m4aPath = `/tmp/${tempId}.m4a`;
+
+        // Write MP3 to temp file
+        fs.writeFileSync(mp3Path, mp3Buffer);
+
+        // Convert to M4A using ffmpeg
+        try {
+            execSync(`ffmpeg -i ${mp3Path} -c:a aac -b:a 128k ${m4aPath} -y`, { stdio: 'pipe' });
+            const m4aBuffer = fs.readFileSync(m4aPath);
+
+            // Clean up temp files
+            fs.unlinkSync(mp3Path);
+            fs.unlinkSync(m4aPath);
+
+            // Return base64 M4A content
+            return m4aBuffer.toString('base64');
+        } catch (ffmpegError) {
+            console.error('FFmpeg conversion error:', ffmpegError.message);
+            // Clean up on error
+            if (fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
+            if (fs.existsSync(m4aPath)) fs.unlinkSync(m4aPath);
+            // Fall back to MP3 if conversion fails
+            return response.data.audioContent;
+        }
     } catch (error) {
         console.error('Google TTS Error:', error.response?.data || error.message);
         throw error;
@@ -359,10 +387,10 @@ async function getAIResponse(systemPrompt, userMessage, userId, botId) {
 // Audio Serving Endpoint
 // ==========================================
 
-// Support both /audio/:audioId and /audio/:audioId.mp3
+// Support both /audio/:audioId and /audio/:audioId.m4a
 app.get('/audio/:audioId', (req, res) => {
-    // Remove .mp3 extension if present
-    const audioId = req.params.audioId.replace(/\.mp3$/, '');
+    // Remove .m4a or .mp3 extension if present
+    const audioId = req.params.audioId.replace(/\.(m4a|mp3)$/, '');
     const audioData = audioStorage.get(audioId);
 
     if (!audioData) {
@@ -370,9 +398,9 @@ app.get('/audio/:audioId', (req, res) => {
     }
 
     res.set({
-        'Content-Type': 'audio/mpeg',
+        'Content-Type': 'audio/mp4',  // M4A uses audio/mp4 MIME type
         'Content-Length': audioData.buffer.length,
-        'Content-Disposition': 'inline; filename="audio.mp3"'
+        'Content-Disposition': 'inline; filename="audio.m4a"'
     });
     res.send(audioData.buffer);
 });
@@ -481,9 +509,9 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                     const audioBase64 = await textToSpeech(lastResponse);
                     const audioId = storeAudio(audioBase64);
 
-                    // Get server URL with .mp3 extension
+                    // Get server URL with .m4a extension (LINE only supports M4A)
                     const host = process.env.RENDER_EXTERNAL_URL || `https://localhost:${PORT}`;
-                    const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}.mp3`;
+                    const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}.m4a`;
 
                     // Send audio message using reply
                     await axios.post(
@@ -563,9 +591,9 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                         const audioBase64 = await textToSpeech(aiResponse);
                         const audioId = storeAudio(audioBase64);
 
-                        // Get server URL with .mp3 extension
+                        // Get server URL with .m4a extension (LINE only supports M4A)
                         const host = process.env.RENDER_EXTERNAL_URL || `https://localhost:${PORT}`;
-                        const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}.mp3`;
+                        const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}.m4a`;
 
                         // Send audio message
                         await axios.post(

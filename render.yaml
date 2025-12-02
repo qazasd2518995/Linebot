@@ -3,7 +3,7 @@ services:
   - type: web
     name: sla-linebot-server
     env: node
-    buildCommand: npm install
+    buildCommand: apt-get update && apt-get install -y ffmpeg && npm install
     startCommand: node server.js
     envVars:
       - key: GROQ_API_KEY
