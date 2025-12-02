@@ -279,8 +279,8 @@ async function textToSpeech(text, languageCode = 'en-US') {
                 input: { text: text },
                 voice: {
                     languageCode: languageCode,
-                    name: languageCode === 'en-US' ? 'en-US-Neural2-J' : `${languageCode}-Standard-A`,
-                    ssmlGender: 'NEUTRAL'
+                    name: 'en-US-Standard-J',  // Male voice
+                    ssmlGender: 'MALE'
                 },
                 audioConfig: {
                     audioEncoding: 'MP3',
