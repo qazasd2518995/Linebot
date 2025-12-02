@@ -592,6 +592,16 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                     botId
                 );
 
+                // Check if user wants audio/voice practice
+                const audioKeywords = [
+                    '語音', '聽', '發音', '念', '唸', '讀給我聽', '說給我聽',
+                    'audio', 'listen', 'voice', 'speak', 'pronunciation',
+                    'hear', 'sound', 'say it', 'read it', 'listening practice'
+                ];
+                const wantsAudio = audioKeywords.some(keyword =>
+                    userMessage.toLowerCase().includes(keyword.toLowerCase())
+                );
+
                 // Split long messages (LINE has 5000 char limit)
                 const maxLength = 4500;
                 if (aiResponse.length > maxLength) {
@@ -610,6 +620,44 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                 // Store last response for /listen command
                 const responseKey = `${botId}_${userId}`;
                 lastBotResponse.set(responseKey, aiResponse);
+
+                // Auto-send audio if user requested voice/listening practice
+                if (wantsAudio && GOOGLE_TTS_API_KEY) {
+                    try {
+                        console.log('User requested audio, generating TTS...');
+
+                        // Generate TTS audio
+                        const audioBase64 = await textToSpeech(aiResponse);
+                        const audioId = storeAudio(audioBase64);
+
+                        // Get server URL
+                        const host = process.env.RENDER_EXTERNAL_URL || `https://localhost:${PORT}`;
+                        const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}`;
+
+                        // Send audio message
+                        await axios.post(
+                            'https://api.line.me/v2/bot/message/push',
+                            {
+                                to: userId,
+                                messages: [{
+                                    type: 'audio',
+                                    originalContentUrl: audioUrl,
+                                    duration: Math.min(aiResponse.length * 80, 60000)  // Estimate duration
+                                }]
+                            },
+                            {
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${botConfig.channelAccessToken}`
+                                }
+                            }
+                        );
+                        console.log('Auto audio sent successfully');
+                    } catch (audioError) {
+                        console.error('Auto TTS Error:', audioError);
+                        // Don't fail the whole response if TTS fails
+                    }
+                }
 
                 // Log conversation to DynamoDB
                 await logConversation(botConfig, botId, userId, userMessage, aiResponse);
