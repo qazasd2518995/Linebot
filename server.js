@@ -206,68 +206,11 @@ async function transcribeAudio(audioBuffer) {
     }
 }
 
-// Get speaking feedback from AI
+// Get speaking feedback from AI - uses the same system prompt as text messages
 async function getSpeakingFeedback(systemPrompt, transcribedText, userId, botId) {
-    const historyKey = `${botId}_${userId}`;
-    if (!conversationHistory[historyKey]) {
-        conversationHistory[historyKey] = [];
-    }
-
-    // Create a speaking-specific prompt
-    const speakingPrompt = `${systemPrompt}
-
-The learner just sent a VOICE MESSAGE. Here is what they said (transcribed):
-"${transcribedText}"
-
-Please provide feedback on:
-1. What they said (acknowledge their attempt)
-2. Any pronunciation tips or corrections if applicable
-3. Suggestions for improvement
-4. Encouragement to continue practicing
-
-Keep your response conversational and supportive.`;
-
-    conversationHistory[historyKey].push({
-        role: 'user',
-        content: `[Voice Message] ${transcribedText}`
-    });
-
-    if (conversationHistory[historyKey].length > 20) {
-        conversationHistory[historyKey] = conversationHistory[historyKey].slice(-20);
-    }
-
-    try {
-        const response = await axios.post(
-            GROQ_API_URL,
-            {
-                model: MODEL,
-                messages: [
-                    { role: 'system', content: speakingPrompt },
-                    ...conversationHistory[historyKey]
-                ],
-                temperature: 0.7,
-                max_tokens: 500
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${GROQ_API_KEY}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-
-        const assistantMessage = response.data.choices[0].message.content;
-
-        conversationHistory[historyKey].push({
-            role: 'assistant',
-            content: assistantMessage
-        });
-
-        return assistantMessage;
-    } catch (error) {
-        console.error('Speaking feedback error:', error.response?.data || error.message);
-        throw error;
-    }
+    // Simply use the regular AI response function with the transcribed text
+    // This ensures the student's system prompt is fully respected
+    return await getAIResponse(systemPrompt, transcribedText, userId, botId);
 }
 
 // Text-to-Speech using Google Cloud TTS
