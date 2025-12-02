@@ -225,15 +225,15 @@ async function textToSpeech(text, languageCode = 'en-US') {
                 input: { text: truncatedText },
                 voice: {
                     languageCode: languageCode,
-                    name: 'en-US-Wavenet-D',  // WaveNet male voice - better quality
-                    ssmlGender: 'MALE'
+                    name: 'en-US-Standard-C',  // Female voice - often clearer
+                    ssmlGender: 'FEMALE'
                 },
                 audioConfig: {
                     audioEncoding: 'MP3',
-                    sampleRateHertz: 24000,
-                    speakingRate: 0.9,
+                    effectsProfileId: ['small-bluetooth-speaker-class-device'],
+                    speakingRate: 1.0,
                     pitch: 0,
-                    volumeGainDb: 0
+                    volumeGainDb: 6.0  // Boost volume significantly
                 }
             }
         );
