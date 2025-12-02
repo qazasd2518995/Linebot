@@ -359,8 +359,10 @@ async function getAIResponse(systemPrompt, userMessage, userId, botId) {
 // Audio Serving Endpoint
 // ==========================================
 
+// Support both /audio/:audioId and /audio/:audioId.mp3
 app.get('/audio/:audioId', (req, res) => {
-    const audioId = req.params.audioId;
+    // Remove .mp3 extension if present
+    const audioId = req.params.audioId.replace(/\.mp3$/, '');
     const audioData = audioStorage.get(audioId);
 
     if (!audioData) {
@@ -369,7 +371,8 @@ app.get('/audio/:audioId', (req, res) => {
 
     res.set({
         'Content-Type': 'audio/mpeg',
-        'Content-Length': audioData.buffer.length
+        'Content-Length': audioData.buffer.length,
+        'Content-Disposition': 'inline; filename="audio.mp3"'
     });
     res.send(audioData.buffer);
 });
@@ -478,9 +481,9 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                     const audioBase64 = await textToSpeech(lastResponse);
                     const audioId = storeAudio(audioBase64);
 
-                    // Get server URL
+                    // Get server URL with .mp3 extension
                     const host = process.env.RENDER_EXTERNAL_URL || `https://localhost:${PORT}`;
-                    const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}`;
+                    const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}.mp3`;
 
                     // Send audio message using reply
                     await axios.post(
@@ -560,9 +563,9 @@ app.post('/webhook/:botId', express.raw({ type: 'application/json' }), async (re
                         const audioBase64 = await textToSpeech(aiResponse);
                         const audioId = storeAudio(audioBase64);
 
-                        // Get server URL
+                        // Get server URL with .mp3 extension
                         const host = process.env.RENDER_EXTERNAL_URL || `https://localhost:${PORT}`;
-                        const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}`;
+                        const audioUrl = `${host.replace(/\/$/, '')}/audio/${audioId}.mp3`;
 
                         // Send audio message
                         await axios.post(
